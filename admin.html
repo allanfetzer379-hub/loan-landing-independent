@@ -73,6 +73,8 @@
     .tag-fresh { background:#dcf8eb; color:#087b42; }
     .tag-duplicate { background:#f9e1ff; color:#a02cb4; border:1px solid #ecaaf5; }
     .tag-base-duplicate { background:#fff0cc; color:#9b5b00; border:1px solid #efc568; }
+    .tag-fb { background:#e8f1ff; color:#1769c2; border:1px solid #a9c9ef; }
+    .tag-tiktok { background:#f3e9ff; color:#7228a8; border:1px solid #d2adeb; }
     .lead-meta { display:flex; align-items:center; gap:20px; white-space:nowrap; overflow:hidden; color:#526178; font-size:13px; }
     .lead-meta span { overflow:hidden; text-overflow:ellipsis; }
     .lead-meta strong { color:#19263a; }
@@ -207,6 +209,14 @@
               <option value="">底粉：全部</option>
               <option value="yes">底粉重複</option>
               <option value="no">非底粉重複</option>
+            </select>
+          </div>
+          <div class="status-field">
+            <select id="traffic-source-filter" onchange="renderLeads()">
+              <option value="">來源：全部</option>
+              <option value="FB">FB</option>
+              <option value="TikTok">TikTok</option>
+              <option value="unknown">未識別</option>
             </select>
           </div>
           <button id="refresh-btn" onclick="loadLeads()">刷新訂單</button>
@@ -652,12 +662,16 @@
       const q = document.getElementById('search').value.trim().toLowerCase();
       const status = document.getElementById('status-filter').value;
       const baseDuplicate = document.getElementById('base-duplicate-filter').value;
+      const trafficSourceFilter = document.getElementById('traffic-source-filter').value;
       const from = document.getElementById('date-from').value;
       const to = document.getElementById('date-to').value;
       return leads.filter(lead => {
         if (status && lead.status !== status) return false;
         if (baseDuplicate === 'yes' && !lead.base_duplicate) return false;
         if (baseDuplicate === 'no' && lead.base_duplicate) return false;
+        const source = trafficSource(lead);
+        if (trafficSourceFilter === 'unknown' && source) return false;
+        if (trafficSourceFilter && trafficSourceFilter !== 'unknown' && source !== trafficSourceFilter) return false;
         const dateValue = lead[dateField] || lead.created_at;
         if (from && new Date(dateValue) < new Date(from + 'T00:00:00')) return false;
         if (to && new Date(dateValue) > new Date(to + 'T23:59:59')) return false;
@@ -688,6 +702,20 @@
       document.querySelectorAll('.quick-dates button').forEach(btn => btn.classList.remove('active'));
     }
 
+    function trafficSource(lead) {
+      const saved = String(lead.traffic_source || '');
+      if (saved === 'FB' || saved === 'TikTok') return saved;
+      const url = String(lead.source_url || '').toLowerCase();
+      if (url.includes('fbclid=') || /utm_source=(facebook|fb|meta)/.test(url)) return 'FB';
+      if (url.includes('ttclid=') || /utm_source=(tiktok|tk)/.test(url)) return 'TikTok';
+      return '';
+    }
+
+    function trafficSourceTag(lead) {
+      const source = trafficSource(lead);
+      return source ? `<span class="tag ${source === 'FB' ? 'tag-fb' : 'tag-tiktok'}">${source}</span>` : '';
+    }
+
     function renderLeads() {
       const list = document.getElementById('lead-list');
       const data = filteredLeads();
@@ -707,6 +735,7 @@
                 : '<span class="tag tag-fresh">新客戶</span>'}
               ${lead.status === 'new' ? '' : `<span class="tag tag-${escapeHTML(lead.status)}">${escapeHTML(statusLabels[lead.status] || lead.status)}</span>`}
               ${lead.line_clicked ? '<span class="tag tag-line">已點 LINE</span>' : ''}
+              ${trafficSourceTag(lead)}
             </div>
             <div class="lead-meta">
               <span>手機 <strong>${escapeHTML(lead.phone)}</strong></span>
@@ -756,6 +785,7 @@
           ${detailItem('帳戶狀態', lead.q2_bank_status)}
           ${detailItem('外幣帳戶', lead.q4_foreign_currency_account)}
           ${detailItem('LINE 點擊', lead.line_clicked ? '已點擊加入 LINE' : '尚未點擊')}
+          ${detailItem('廣告來源', trafficSource(lead) || '未識別')}
           ${detailItem('來源網址', lead.source_url)}
         </div>
         <div class="detail-section">
@@ -908,7 +938,7 @@
     }
 
     function exportCSV() {
-      const cols = ['created_at','name','age','city','id_number','phone','line_id','q1_existing_loan','q2_bank_status','q3_amount_needed','q4_foreign_currency_account','status','base_duplicate','base_duplicate_source','notes','source_url'];
+      const cols = ['created_at','name','age','city','id_number','phone','line_id','q1_existing_loan','q2_bank_status','q3_amount_needed','q4_foreign_currency_account','status','base_duplicate','base_duplicate_source','traffic_source','notes','source_url'];
       const selectedRows = leads.filter(row => selectedLeadIds.has(row.id));
       const exportRows = selectedRows.length > 0 ? selectedRows : filteredLeads();
       if (exportRows.length === 0) {
