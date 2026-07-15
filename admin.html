@@ -107,6 +107,9 @@
     .pixel-row input[type="text"] { font-family:Consolas,monospace; }
     .pixel-toggle { display:flex; align-items:center; gap:6px; margin:0; white-space:nowrap; }
     .pixel-toggle input { width:auto; }
+    .pixel-summary { display:inline-block; margin-left:8px; color:#1368b7; font-weight:700; }
+    .pixel-bulk { margin-top:18px; padding-top:16px; border-top:1px solid #e5eaf0; }
+    .pixel-bulk textarea { min-height:82px; font-family:Consolas,monospace; }
     .setting-status { min-height:22px; margin-top:12px; }
     @media (max-width: 1050px) {
       .stats { grid-template-columns: repeat(3,1fr); }
@@ -260,10 +263,17 @@
 
         <div class="panel settings-panel">
           <h3>Facebook Pixel 管理</h3>
-          <p class="notice">所有啟用中的 Pixel 都會收到落地頁目前的相同事件。建議保留正在投放使用的 Pixel。</p>
+          <p class="notice">所有啟用中的 Pixel 都會收到落地頁目前的相同事件。建議保留正在投放使用的 Pixel。<span id="pixel-summary" class="pixel-summary"></span></p>
           <div id="pixel-list" class="pixel-list"></div>
           <div class="settings-actions">
-            <button class="secondary" onclick="addPixelRow()">新增 Pixel</button>
+            <button id="add-pixel-btn" class="secondary" onclick="addPixelRow()">新增 Pixel</button>
+          </div>
+          <div class="pixel-bulk">
+            <label for="pixel-bulk-input">批量新增 Pixel ID</label>
+            <textarea id="pixel-bulk-input" inputmode="numeric" placeholder="每行輸入一個 Pixel ID，也可用逗號或空格分隔"></textarea>
+            <div class="settings-actions">
+              <button id="add-pixel-batch-btn" class="secondary" onclick="addPixelBatch()">批量加入</button>
+            </div>
           </div>
         </div>
 
@@ -298,6 +308,7 @@
     const SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_9nexyqqATbzJel06RgnO5w_lFY-R6gm';
     const ADMIN_LOGIN_USERNAME = 'admin';
     const ADMIN_LOGIN_EMAIL = 'allanfetzer379@gmail.com';
+    const MAX_FACEBOOK_PIXELS = 10;
     const client = window.supabase ? supabase.createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY) : null;
     const statusLabels = {
       new: '新客戶',
@@ -437,6 +448,15 @@
       updateLinePreview();
       const list = document.getElementById('pixel-list');
       const pixels = Array.isArray(siteSettings.pixel_ids) ? siteSettings.pixel_ids : [];
+      const configuredPixels = pixels.filter(pixel => String(pixel.id || '').trim());
+      const enabledPixels = configuredPixels.filter(pixel => pixel.enabled !== false);
+      const pixelSummary = document.getElementById('pixel-summary');
+      if (pixelSummary) pixelSummary.textContent = `已設定 ${configuredPixels.length}/${MAX_FACEBOOK_PIXELS}，已啟用 ${enabledPixels.length}`;
+      const atPixelLimit = pixels.length >= MAX_FACEBOOK_PIXELS;
+      const addPixelButton = document.getElementById('add-pixel-btn');
+      const addPixelBatchButton = document.getElementById('add-pixel-batch-btn');
+      if (addPixelButton) addPixelButton.disabled = atPixelLimit;
+      if (addPixelBatchButton) addPixelBatchButton.disabled = atPixelLimit;
       list.innerHTML = pixels.map((pixel, index) => `
         <div class="pixel-row">
           <input type="text" value="${escapeHTML(pixel.id)}" inputmode="numeric" onchange="updatePixelId(${index},this.value)" aria-label="Pixel ID" />
@@ -473,11 +493,42 @@
     }
 
     function addPixelRow() {
-      if (siteSettings.pixel_ids.length >= 5) {
-        alert('最多可設定 5 個 Pixel。');
+      if (siteSettings.pixel_ids.length >= MAX_FACEBOOK_PIXELS) {
+        alert(`最多可設定 ${MAX_FACEBOOK_PIXELS} 個 Facebook Pixel。`);
         return;
       }
       siteSettings.pixel_ids.push({ id: '', enabled: true });
+      renderSiteSettings();
+    }
+
+    function addPixelBatch() {
+      const input = document.getElementById('pixel-bulk-input');
+      const rawIds = String(input ? input.value : '')
+        .split(/[\s,，;；]+/)
+        .map(id => id.trim())
+        .filter(Boolean);
+      const uniqueIds = [...new Set(rawIds)];
+      if (!uniqueIds.length) {
+        alert('請先輸入至少一個 Pixel ID。');
+        return;
+      }
+      if (uniqueIds.some(id => !/^\d{8,20}$/.test(id))) {
+        alert('Pixel ID 必須為 8 至 20 位數字，請修正後再加入。');
+        return;
+      }
+      const existingIds = new Set(siteSettings.pixel_ids.map(pixel => String(pixel.id || '').trim()).filter(Boolean));
+      const newIds = uniqueIds.filter(id => !existingIds.has(id));
+      if (!newIds.length) {
+        alert('輸入的 Pixel ID 已經存在。');
+        return;
+      }
+      const available = MAX_FACEBOOK_PIXELS - siteSettings.pixel_ids.length;
+      if (newIds.length > available) {
+        alert(`最多可設定 ${MAX_FACEBOOK_PIXELS} 個 Facebook Pixel，目前還可新增 ${available} 個。`);
+        return;
+      }
+      siteSettings.pixel_ids.push(...newIds.map(id => ({ id, enabled: true })));
+      if (input) input.value = '';
       renderSiteSettings();
     }
 
@@ -546,6 +597,11 @@
       }
       if (new Set(ids).size !== ids.length) {
         status.textContent = 'Pixel ID 不可重複。';
+        status.className = 'notice error setting-status';
+        return;
+      }
+      if (pixels.length > MAX_FACEBOOK_PIXELS) {
+        status.textContent = `最多可設定 ${MAX_FACEBOOK_PIXELS} 個 Facebook Pixel。`;
         status.className = 'notice error setting-status';
         return;
       }
