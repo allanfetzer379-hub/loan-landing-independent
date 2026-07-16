@@ -52,6 +52,8 @@
     .list-head { height: 64px; display: flex; align-items: center; justify-content: space-between; padding: 0 24px; border-bottom: 1px solid #dce2ea; }
     .list-head h2 { margin: 0; font-size: 18px; }
     .list-head-right { display: flex; align-items: center; gap: 12px; color: #8794a8; font-size: 13px; }
+    .pagination { min-height:58px; padding:10px 18px; border-top:1px solid #e7ebf0; display:flex; align-items:center; justify-content:center; gap:12px; }
+    .pagination span { min-width:150px; text-align:center; color:#68778e; font-size:13px; }
     .select-all-wrap { display: flex; align-items: center; gap: 7px; color: #68778e; font-size: 13px; }
     .select-all-wrap input, .lead-check { width: auto; }
     .lead-list { min-height: 140px; }
@@ -130,6 +132,9 @@
       .date-field, .status-field, .search-wrap { width:100%; min-width:0; }
       .filter-spacer { display:none; }
       .list-head { height:auto; padding:14px; gap:10px; flex-wrap:wrap; }
+      .list-head-right { width:100%; flex-wrap:wrap; }
+      .pagination { padding:10px; gap:8px; }
+      .pagination span { min-width:120px; }
       .lead-row { display:block; padding:14px; }
       .lead-check { margin-bottom:9px; }
       .lead-meta { gap:8px 14px; flex-wrap:wrap; white-space:normal; }
@@ -243,6 +248,11 @@
         </div>
         <div id="lead-list" class="lead-list"></div>
         <p id="empty-msg" class="notice empty hidden">目前沒有符合條件的名單。</p>
+        <div id="lead-pagination" class="pagination hidden">
+          <button id="prev-page-btn" class="secondary" onclick="changeLeadPage(-1)">上一頁</button>
+          <span id="page-info">第 1 / 1 頁</span>
+          <button id="next-page-btn" class="secondary" onclick="changeLeadPage(1)">下一頁</button>
+        </div>
       </div>
 
       <div id="settings-view" class="settings-wrap hidden">
@@ -309,6 +319,8 @@
     const ADMIN_LOGIN_USERNAME = 'admin';
     const ADMIN_LOGIN_EMAIL = 'allanfetzer379@gmail.com';
     const MAX_FACEBOOK_PIXELS = 10;
+    const LEADS_BATCH_SIZE = 1000;
+    const LEADS_PAGE_SIZE = 100;
     const client = window.supabase ? supabase.createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY) : null;
     const statusLabels = {
       new: '新客戶',
@@ -321,6 +333,9 @@
     let leads = [];
     let selectedLeadIds = new Set();
     let activeDetailId = null;
+    let totalLeadCount = 0;
+    let currentLeadPage = 1;
+    let lastLeadFilterKey = '';
     let siteSettings = {
       line_url: 'https://line.me/R/ti/p/@111tfmeq',
       line_id: '@111tfmeq',
@@ -677,27 +692,47 @@
         refreshBtn.disabled = true;
         refreshBtn.textContent = '刷新中...';
       }
-      const { data, error } = await client
-        .from('leads')
-        .select('*')
-        .order('created_at', { ascending: false });
-      if (error) {
+      const loadedLeads = [];
+      let expectedTotal = null;
+      let offset = 0;
+      let snapshotCreatedAt = '';
+      try {
+        while (true) {
+          let query = client
+            .from('leads')
+            .select('*', { count: 'exact' })
+            .order('created_at', { ascending: false })
+            .range(offset, offset + LEADS_BATCH_SIZE - 1);
+          if (snapshotCreatedAt) query = query.lte('created_at', snapshotCreatedAt);
+          const { data, error, count } = await query;
+          if (error) throw error;
+          const batch = data || [];
+          if (!snapshotCreatedAt && batch.length) snapshotCreatedAt = batch[0].created_at;
+          if (expectedTotal === null && Number.isFinite(count)) expectedTotal = count;
+          loadedLeads.push(...batch);
+          if (refreshBtn) {
+            const progressTotal = expectedTotal === null ? '?' : expectedTotal;
+            refreshBtn.textContent = `載入中 ${loadedLeads.length}/${progressTotal}`;
+          }
+          if (batch.length < LEADS_BATCH_SIZE || (expectedTotal !== null && loadedLeads.length >= expectedTotal)) break;
+          offset += batch.length;
+        }
+        const uniqueLeads = new Map();
+        loadedLeads.forEach(lead => uniqueLeads.set(lead.id, lead));
+        leads = [...uniqueLeads.values()];
+        totalLeadCount = expectedTotal === null ? leads.length : expectedTotal;
+        markDuplicateLeads();
+        selectedLeadIds = new Set([...selectedLeadIds].filter(id => leads.some(lead => lead.id === id)));
+        renderStats();
+        renderLeads();
+        if (activeDetailId && leads.some(lead => lead.id === activeDetailId)) openDetails(activeDetailId);
+      } catch (error) {
         alert('讀取名單失敗：' + error.message);
+      } finally {
         if (refreshBtn) {
           refreshBtn.disabled = false;
           refreshBtn.textContent = '刷新訂單';
         }
-        return;
-      }
-      leads = data || [];
-      markDuplicateLeads();
-      selectedLeadIds = new Set([...selectedLeadIds].filter(id => leads.some(lead => lead.id === id)));
-      renderStats();
-      renderLeads();
-      if (activeDetailId && leads.some(lead => lead.id === activeDetailId)) openDetails(activeDetailId);
-      if (refreshBtn) {
-        refreshBtn.disabled = false;
-        refreshBtn.textContent = '刷新訂單';
       }
     }
 
@@ -772,17 +807,52 @@
       return source ? `<span class="tag ${source === 'FB' ? 'tag-fb' : 'tag-tiktok'}">${source}</span>` : '';
     }
 
+    function leadFilterKey() {
+      return [
+        document.getElementById('search').value.trim().toLowerCase(),
+        document.getElementById('status-filter').value,
+        document.getElementById('base-duplicate-filter').value,
+        document.getElementById('traffic-source-filter').value,
+        document.getElementById('date-from').value,
+        document.getElementById('date-to').value
+      ].join('|');
+    }
+
+    function changeLeadPage(delta) {
+      const data = filteredLeads();
+      const totalPages = Math.max(1, Math.ceil(data.length / LEADS_PAGE_SIZE));
+      currentLeadPage = Math.min(totalPages, Math.max(1, currentLeadPage + delta));
+      renderLeads();
+    }
+
+    function renderLeadPagination(totalRows, totalPages) {
+      const pagination = document.getElementById('lead-pagination');
+      pagination.classList.toggle('hidden', totalRows <= LEADS_PAGE_SIZE);
+      document.getElementById('page-info').textContent = `第 ${currentLeadPage} / ${totalPages} 頁，每頁 ${LEADS_PAGE_SIZE} 筆`;
+      document.getElementById('prev-page-btn').disabled = currentLeadPage <= 1;
+      document.getElementById('next-page-btn').disabled = currentLeadPage >= totalPages;
+    }
+
     function renderLeads() {
       const list = document.getElementById('lead-list');
       const data = filteredLeads();
+      const filterKey = leadFilterKey();
+      if (filterKey !== lastLeadFilterKey) {
+        currentLeadPage = 1;
+        lastLeadFilterKey = filterKey;
+      }
+      const totalPages = Math.max(1, Math.ceil(data.length / LEADS_PAGE_SIZE));
+      currentLeadPage = Math.min(currentLeadPage, totalPages);
+      const pageStart = (currentLeadPage - 1) * LEADS_PAGE_SIZE;
+      const pageData = data.slice(pageStart, pageStart + LEADS_PAGE_SIZE);
       document.getElementById('empty-msg').classList.toggle('hidden', data.length > 0);
-      document.getElementById('result-count').textContent = `${data.length} 筆・篩選中`;
-      list.innerHTML = data.map((lead, index) => `
+      document.getElementById('result-count').textContent = `${data.length} 筆・已載入 ${leads.length}/${totalLeadCount || leads.length}`;
+      list.innerHTML = pageData.map((lead, index) => `
         <article class="lead-row">
           <input class="lead-check" type="checkbox" ${selectedLeadIds.has(lead.id) ? 'checked' : ''} onchange="toggleLeadSelection('${lead.id}', this.checked)" />
           <div class="lead-summary">
             <div class="lead-title-line">
-              <span class="lead-index">${data.length - index}</span>
+              <span class="lead-index">${data.length - pageStart - index}</span>
               <span class="lead-name">${escapeHTML(lead.name || '未填姓名')}</span>
               ${lead.base_duplicate
                 ? '<span class="tag tag-base-duplicate">底粉重複</span>'
@@ -811,6 +881,7 @@
           </div>
         </article>
       `).join('');
+      renderLeadPagination(data.length, totalPages);
       renderStats();
       updateSelectionUI(data);
     }
