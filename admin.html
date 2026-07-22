@@ -195,14 +195,14 @@
             <button type="button" data-days="30" onclick="setQuickDate(30,this)">近30日</button>
           </div>
           <div class="date-field">
-            <input id="date-from" type="date" aria-label="開始日期" onchange="clearQuickDate();renderLeads()" />
+            <input id="date-from" type="date" aria-label="開始日期" onchange="clearQuickDate();applyLeadFilters()" />
           </div>
           <span class="notice">—</span>
           <div class="date-field">
-            <input id="date-to" type="date" aria-label="結束日期" onchange="clearQuickDate();renderLeads()" />
+            <input id="date-to" type="date" aria-label="結束日期" onchange="clearQuickDate();applyLeadFilters()" />
           </div>
           <div class="status-field">
-            <select id="status-filter" onchange="renderLeads()">
+            <select id="status-filter" onchange="applyLeadFilters()">
               <option value="">全部</option>
               <option value="new">新客戶</option>
               <option value="contacted">已聯繫</option>
@@ -213,25 +213,25 @@
             </select>
           </div>
           <div class="status-field">
-            <select id="base-duplicate-filter" onchange="renderLeads()">
+            <select id="base-duplicate-filter" onchange="applyLeadFilters()">
               <option value="">底粉：全部</option>
               <option value="yes">底粉重複</option>
               <option value="no">非底粉重複</option>
             </select>
           </div>
           <div class="status-field">
-            <select id="traffic-source-filter" onchange="renderLeads()">
+            <select id="traffic-source-filter" onchange="applyLeadFilters()">
               <option value="">來源：全部</option>
               <option value="FB">FB</option>
               <option value="TikTok">TikTok</option>
               <option value="unknown">未識別</option>
             </select>
           </div>
-          <button id="refresh-btn" onclick="loadLeads()">刷新訂單</button>
+          <button id="refresh-btn" onclick="refreshLeadList()">刷新訂單</button>
           <div class="filter-spacer"></div>
           <div class="search-wrap">
-            <input id="search" placeholder="搜尋姓名 / 手機 / LINE / 身分證" oninput="renderLeads()" />
-            <button type="button" onclick="renderLeads()">搜尋</button>
+            <input id="search" placeholder="搜尋姓名 / 手機 / LINE / 身分證" oninput="scheduleLeadSearch()" />
+            <button type="button" onclick="applyLeadFilters()">搜尋</button>
           </div>
         </div>
         <p id="export-note" class="notice export-note">未勾選時，會匯出目前篩選結果。</p>
@@ -319,8 +319,8 @@
     const ADMIN_LOGIN_USERNAME = 'admin';
     const ADMIN_LOGIN_EMAIL = 'allanfetzer379@gmail.com';
     const MAX_FACEBOOK_PIXELS = 10;
-    const LEADS_BATCH_SIZE = 1000;
     const LEADS_PAGE_SIZE = 100;
+    const EXPORT_BATCH_SIZE = 1000;
     const client = window.supabase ? supabase.createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY) : null;
     const statusLabels = {
       new: '新客戶',
@@ -336,6 +336,7 @@
     let totalLeadCount = 0;
     let currentLeadPage = 1;
     let lastLeadFilterKey = '';
+    let searchTimer = null;
     let siteSettings = {
       line_url: 'https://line.me/R/ti/p/@111tfmeq',
       line_id: '@111tfmeq',
@@ -665,20 +666,9 @@
     }
 
     function markDuplicateLeads() {
-      const seenNames = new Set();
-      const seenPhones = new Set();
-      [...leads]
-        .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
-        .forEach(lead => {
-          const name = normalizeLeadName(lead.name);
-          const phone = normalizeLeadPhone(lead.phone);
-          lead.__isDuplicate = Boolean(
-            (name && seenNames.has(name)) ||
-            (phone && seenPhones.has(phone))
-          );
-          if (name) seenNames.add(name);
-          if (phone) seenPhones.add(phone);
-        });
+      leads.forEach(lead => {
+        lead.__isDuplicate = Boolean(lead.duplicate_customer);
+      });
     }
 
     function leadCustomerType(lead) {
@@ -686,45 +676,83 @@
       return lead.__isDuplicate ? '重粉' : '新客戶';
     }
 
-    async function loadLeads() {
+    function currentLeadFilters() {
+      return {
+        search: document.getElementById('search').value.trim().toLowerCase(),
+        status: document.getElementById('status-filter').value,
+        baseDuplicate: document.getElementById('base-duplicate-filter').value,
+        trafficSource: document.getElementById('traffic-source-filter').value,
+        from: document.getElementById('date-from').value,
+        to: document.getElementById('date-to').value
+      };
+    }
+
+    function dateBoundary(value, endOfDay = false) {
+      if (!value) return '';
+      return new Date(value + (endOfDay ? 'T23:59:59.999' : 'T00:00:00')).toISOString();
+    }
+
+    function safeSearchTerm(value) {
+      return String(value || '').replace(/[,%()]/g, ' ').trim();
+    }
+
+    function applyFiltersToQuery(query, options = {}) {
+      const filters = { ...currentLeadFilters(), ...options };
+      if (filters.status) query = query.eq('status', filters.status);
+      if (filters.baseDuplicate === 'yes') query = query.eq('base_duplicate', true);
+      if (filters.baseDuplicate === 'no') query = query.eq('base_duplicate', false);
+      if (filters.trafficSource === 'FB') query = query.eq('traffic_source', 'FB');
+      if (filters.trafficSource === 'TikTok') query = query.eq('traffic_source', 'TikTok');
+      if (filters.trafficSource === 'unknown') query = query.is('traffic_source', null);
+      const dateField = filters.dateField || 'created_at';
+      if (filters.from) query = query.gte(dateField, dateBoundary(filters.from));
+      if (filters.to) query = query.lte(dateField, dateBoundary(filters.to, true));
+      const term = safeSearchTerm(filters.search);
+      if (term) {
+        query = query.or(`name.ilike.%${term}%,phone.ilike.%${term}%,line_id.ilike.%${term}%,city.ilike.%${term}%,id_number.ilike.%${term}%`);
+      }
+      return query;
+    }
+
+    async function countLeads(options = {}) {
+      let query = client.from('leads').select('id', { count: 'exact', head: true });
+      query = applyFiltersToQuery(query, options);
+      const { count, error } = await query;
+      if (error) throw error;
+      return Number.isFinite(count) ? count : 0;
+    }
+
+    async function loadLeads({ refreshStats = true } = {}) {
       const refreshBtn = document.getElementById('refresh-btn');
       if (refreshBtn) {
         refreshBtn.disabled = true;
         refreshBtn.textContent = '刷新中...';
       }
-      const loadedLeads = [];
-      let expectedTotal = null;
-      let offset = 0;
-      let snapshotCreatedAt = '';
       try {
-        while (true) {
-          let query = client
-            .from('leads')
-            .select('*', { count: 'exact' })
-            .order('created_at', { ascending: false })
-            .range(offset, offset + LEADS_BATCH_SIZE - 1);
-          if (snapshotCreatedAt) query = query.lte('created_at', snapshotCreatedAt);
-          const { data, error, count } = await query;
-          if (error) throw error;
-          const batch = data || [];
-          if (!snapshotCreatedAt && batch.length) snapshotCreatedAt = batch[0].created_at;
-          if (expectedTotal === null && Number.isFinite(count)) expectedTotal = count;
-          loadedLeads.push(...batch);
-          if (refreshBtn) {
-            const progressTotal = expectedTotal === null ? '?' : expectedTotal;
-            refreshBtn.textContent = `載入中 ${loadedLeads.length}/${progressTotal}`;
-          }
-          if (batch.length < LEADS_BATCH_SIZE || (expectedTotal !== null && loadedLeads.length >= expectedTotal)) break;
-          offset += batch.length;
+        const filterKey = leadFilterKey();
+        if (filterKey !== lastLeadFilterKey) {
+          currentLeadPage = 1;
+          lastLeadFilterKey = filterKey;
         }
-        const uniqueLeads = new Map();
-        loadedLeads.forEach(lead => uniqueLeads.set(lead.id, lead));
-        leads = [...uniqueLeads.values()];
-        totalLeadCount = expectedTotal === null ? leads.length : expectedTotal;
+        const pageStart = (currentLeadPage - 1) * LEADS_PAGE_SIZE;
+        let query = client
+          .from('leads')
+          .select('*', { count: 'exact' })
+          .order('created_at', { ascending: false })
+          .range(pageStart, pageStart + LEADS_PAGE_SIZE - 1);
+        query = applyFiltersToQuery(query);
+        const { data, error, count } = await query;
+        if (error) throw error;
+        totalLeadCount = Number.isFinite(count) ? count : 0;
+        const totalPages = Math.max(1, Math.ceil(totalLeadCount / LEADS_PAGE_SIZE));
+        if (currentLeadPage > totalPages) {
+          currentLeadPage = totalPages;
+          return loadLeads({ refreshStats });
+        }
+        leads = data || [];
         markDuplicateLeads();
-        selectedLeadIds = new Set([...selectedLeadIds].filter(id => leads.some(lead => lead.id === id)));
-        renderStats();
         renderLeads();
+        if (refreshStats) await loadLeadStats();
         if (activeDetailId && leads.some(lead => lead.id === activeDetailId)) openDetails(activeDetailId);
       } catch (error) {
         alert('讀取名單失敗：' + error.message);
@@ -736,40 +764,38 @@
       }
     }
 
-    function renderStats() {
-      const today = new Date();
-      const createdData = filteredLeads('created_at');
-      const statusData = filteredLeads('updated_at');
-      document.getElementById('stat-filtered').textContent = createdData.length;
-      document.getElementById('stat-today').textContent = createdData.filter(x => isSameDay(x.created_at, today)).length;
-      document.getElementById('stat-new').textContent = createdData.filter(x => x.status === 'new').length;
-      document.getElementById('stat-contacted').textContent = statusData.filter(x => x.status === 'contacted').length;
-      document.getElementById('stat-line-added').textContent = statusData.filter(x => x.status === 'line_added').length;
-      document.getElementById('stat-approved').textContent = statusData.filter(x => x.status === 'approved').length;
-      document.getElementById('stat-invalid').textContent = statusData.filter(x => x.status === 'invalid').length;
+    async function loadLeadStats() {
+      const filters = currentLeadFilters();
+      const today = dateInputValue(new Date());
+      const todayMatchesDateFilter = (!filters.from || filters.from <= today) && (!filters.to || filters.to >= today);
+      const statusCount = async (status, dateField) => {
+        if (filters.status && filters.status !== status) return 0;
+        return countLeads({ status, dateField });
+      };
+      try {
+        const [filtered, todayAdded, fresh, contacted, lineAdded, approved, invalid] = await Promise.all([
+          countLeads(),
+          todayMatchesDateFilter ? countLeads({ from: today, to: today, dateField: 'created_at' }) : 0,
+          statusCount('new', 'created_at'),
+          statusCount('contacted', 'status_changed_at'),
+          statusCount('line_added', 'status_changed_at'),
+          statusCount('approved', 'status_changed_at'),
+          statusCount('invalid', 'status_changed_at')
+        ]);
+        document.getElementById('stat-filtered').textContent = filtered;
+        document.getElementById('stat-today').textContent = todayAdded;
+        document.getElementById('stat-new').textContent = fresh;
+        document.getElementById('stat-contacted').textContent = contacted;
+        document.getElementById('stat-line-added').textContent = lineAdded;
+        document.getElementById('stat-approved').textContent = approved;
+        document.getElementById('stat-invalid').textContent = invalid;
+      } catch (error) {
+        console.error('統計讀取失敗', error);
+      }
     }
 
-    function filteredLeads(dateField = 'created_at') {
-      const q = document.getElementById('search').value.trim().toLowerCase();
-      const status = document.getElementById('status-filter').value;
-      const baseDuplicate = document.getElementById('base-duplicate-filter').value;
-      const trafficSourceFilter = document.getElementById('traffic-source-filter').value;
-      const from = document.getElementById('date-from').value;
-      const to = document.getElementById('date-to').value;
-      return leads.filter(lead => {
-        if (status && lead.status !== status) return false;
-        if (baseDuplicate === 'yes' && !lead.base_duplicate) return false;
-        if (baseDuplicate === 'no' && lead.base_duplicate) return false;
-        const source = trafficSource(lead);
-        if (trafficSourceFilter === 'unknown' && source) return false;
-        if (trafficSourceFilter && trafficSourceFilter !== 'unknown' && source !== trafficSourceFilter) return false;
-        const dateValue = lead[dateField] || lead.created_at;
-        if (from && new Date(dateValue) < new Date(from + 'T00:00:00')) return false;
-        if (to && new Date(dateValue) > new Date(to + 'T23:59:59')) return false;
-        if (!q) return true;
-        return [lead.name, lead.phone, lead.line_id, lead.city, lead.id_number]
-          .some(value => String(value || '').toLowerCase().includes(q));
-      });
+    function filteredLeads() {
+      return leads;
     }
 
     function setQuickDate(days, button) {
@@ -786,11 +812,27 @@
       document.getElementById('date-to').value = dateInputValue(to);
       document.querySelectorAll('.quick-dates button').forEach(btn => btn.classList.remove('active'));
       if (button) button.classList.add('active');
-      renderLeads();
+      applyLeadFilters();
     }
 
     function clearQuickDate() {
       document.querySelectorAll('.quick-dates button').forEach(btn => btn.classList.remove('active'));
+    }
+
+    function applyLeadFilters() {
+      currentLeadPage = 1;
+      lastLeadFilterKey = leadFilterKey();
+      return loadLeads();
+    }
+
+    function refreshLeadList() {
+      currentLeadPage = 1;
+      return loadLeads();
+    }
+
+    function scheduleLeadSearch() {
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(applyLeadFilters, 350);
     }
 
     function trafficSource(lead) {
@@ -819,10 +861,9 @@
     }
 
     function changeLeadPage(delta) {
-      const data = filteredLeads();
-      const totalPages = Math.max(1, Math.ceil(data.length / LEADS_PAGE_SIZE));
+      const totalPages = Math.max(1, Math.ceil(totalLeadCount / LEADS_PAGE_SIZE));
       currentLeadPage = Math.min(totalPages, Math.max(1, currentLeadPage + delta));
-      renderLeads();
+      loadLeads({ refreshStats: false });
     }
 
     function renderLeadPagination(totalRows, totalPages) {
@@ -835,24 +876,19 @@
 
     function renderLeads() {
       const list = document.getElementById('lead-list');
-      const data = filteredLeads();
-      const filterKey = leadFilterKey();
-      if (filterKey !== lastLeadFilterKey) {
-        currentLeadPage = 1;
-        lastLeadFilterKey = filterKey;
-      }
-      const totalPages = Math.max(1, Math.ceil(data.length / LEADS_PAGE_SIZE));
+      const data = leads;
+      const totalPages = Math.max(1, Math.ceil(totalLeadCount / LEADS_PAGE_SIZE));
       currentLeadPage = Math.min(currentLeadPage, totalPages);
       const pageStart = (currentLeadPage - 1) * LEADS_PAGE_SIZE;
-      const pageData = data.slice(pageStart, pageStart + LEADS_PAGE_SIZE);
+      const pageData = data;
       document.getElementById('empty-msg').classList.toggle('hidden', data.length > 0);
-      document.getElementById('result-count').textContent = `${data.length} 筆・已載入 ${leads.length}/${totalLeadCount || leads.length}`;
+      document.getElementById('result-count').textContent = `${totalLeadCount} 筆・本頁 ${data.length} 筆`;
       list.innerHTML = pageData.map((lead, index) => `
         <article class="lead-row">
           <input class="lead-check" type="checkbox" ${selectedLeadIds.has(lead.id) ? 'checked' : ''} onchange="toggleLeadSelection('${lead.id}', this.checked)" />
           <div class="lead-summary">
             <div class="lead-title-line">
-              <span class="lead-index">${data.length - pageStart - index}</span>
+              <span class="lead-index">${totalLeadCount - pageStart - index}</span>
               <span class="lead-name">${escapeHTML(lead.name || '未填姓名')}</span>
               ${lead.base_duplicate
                 ? '<span class="tag tag-base-duplicate">底粉重複</span>'
@@ -881,8 +917,7 @@
           </div>
         </article>
       `).join('');
-      renderLeadPagination(data.length, totalPages);
-      renderStats();
+      renderLeadPagination(totalLeadCount, totalPages);
       updateSelectionUI(data);
     }
 
@@ -993,11 +1028,11 @@
     function toggleLeadSelection(id, checked) {
       if (checked) selectedLeadIds.add(id);
       else selectedLeadIds.delete(id);
-      updateSelectionUI(filteredLeads());
+      updateSelectionUI(leads);
     }
 
     function toggleAllVisible(checked) {
-      filteredLeads().forEach(lead => {
+      leads.forEach(lead => {
         if (checked) selectedLeadIds.add(lead.id);
         else selectedLeadIds.delete(lead.id);
       });
@@ -1064,24 +1099,66 @@
       }
     }
 
-    function exportCSV() {
-      const cols = ['created_at','name','age','city','id_number','phone','line_id','q1_existing_loan','q2_bank_status','q3_amount_needed','q4_foreign_currency_account','status','base_duplicate','base_duplicate_source','traffic_source','notes','source_url'];
-      const selectedRows = leads.filter(row => selectedLeadIds.has(row.id));
-      const exportRows = selectedRows.length > 0 ? selectedRows : filteredLeads();
-      if (exportRows.length === 0) {
-        alert('目前沒有可匯出的名單。');
-        return;
+    async function fetchSelectedLeads() {
+      const ids = [...selectedLeadIds];
+      const rows = [];
+      for (let offset = 0; offset < ids.length; offset += 100) {
+        const { data, error } = await client.from('leads').select('*').in('id', ids.slice(offset, offset + 100));
+        if (error) throw error;
+        rows.push(...(data || []));
       }
-      const csv = [cols.join(',')].concat(exportRows.map(row =>
-        cols.map(col => '"' + String(row[col] || '').replace(/"/g, '""') + '"').join(',')
-      )).join('\n');
-      const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = 'leads-' + new Date().toISOString().slice(0,10) + '.csv';
-      a.click();
-      URL.revokeObjectURL(url);
+      return rows;
+    }
+
+    async function fetchFilteredLeadsForExport() {
+      const rows = [];
+      let offset = 0;
+      while (true) {
+        let query = client
+          .from('leads')
+          .select('*')
+          .order('created_at', { ascending: false })
+          .range(offset, offset + EXPORT_BATCH_SIZE - 1);
+        query = applyFiltersToQuery(query);
+        const { data, error } = await query;
+        if (error) throw error;
+        const batch = data || [];
+        rows.push(...batch);
+        if (batch.length < EXPORT_BATCH_SIZE) break;
+        offset += batch.length;
+      }
+      return rows;
+    }
+
+    async function exportCSV() {
+      const cols = ['created_at','name','age','city','id_number','phone','line_id','q1_existing_loan','q2_bank_status','q3_amount_needed','q4_foreign_currency_account','status','base_duplicate','base_duplicate_source','traffic_source','notes','source_url'];
+      const exportBtn = document.getElementById('export-btn');
+      exportBtn.disabled = true;
+      exportBtn.textContent = '匯出中...';
+      try {
+        const exportRows = selectedLeadIds.size > 0
+          ? await fetchSelectedLeads()
+          : await fetchFilteredLeadsForExport();
+        if (exportRows.length === 0) {
+          alert('目前沒有可匯出的名單。');
+          return;
+        }
+        const csv = [cols.join(',')].concat(exportRows.map(row =>
+          cols.map(col => '"' + String(row[col] || '').replace(/"/g, '""') + '"').join(',')
+        )).join('\n');
+        const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'leads-' + new Date().toISOString().slice(0,10) + '.csv';
+        a.click();
+        URL.revokeObjectURL(url);
+      } catch (error) {
+        alert('匯出失敗：' + error.message);
+      } finally {
+        exportBtn.disabled = false;
+        updateSelectionUI(leads);
+      }
     }
 
     checkSession();
