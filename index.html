@@ -2003,7 +2003,7 @@ var liveNum = 1247;
 function updateLiveCounter() {
   liveNum += Math.floor(Math.random() * 3) + 1;
   var f = liveNum.toLocaleString('zh-TW');
-  ['live-num','sidebar-count','ticker-count','ticker-count2','ticker-count3','quiz-header-count'].forEach(function(id) {
+  ['live-num','sidebar-count','ticker-count2','quiz-header-count'].forEach(function(id) {
     var el = document.getElementById(id);
     if (el) el.textContent = f;
   });
@@ -2015,10 +2015,10 @@ var quota = 37;
 function updateQuota() {
   if (quota > 8) {
     quota -= Math.floor(Math.random() * 2);
-    var el = document.getElementById('quota-count');
-    if (el) el.textContent = quota;
-    var el2 = document.getElementById('quiz-header-quota');
-    if (el2) el2.textContent = quota;
+    ['quota-count','quiz-header-quota','ticker-count','ticker-count3'].forEach(function(id) {
+      var el = document.getElementById(id);
+      if (el) el.textContent = quota;
+    });
   }
 }
 setInterval(updateQuota, 12000);
